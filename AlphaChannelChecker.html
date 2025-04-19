@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>αチャンネルメタデータチェッカー</title>
+  <!-- Dark Theme Styles -->
+  <style>
+    :root {
+      --bg: #121212;
+      --fg: #e0e0e0;
+      --accent: #ffcc00;
+      --panel-bg: #1e1e1e;
+      --border: #444;
+      --highlight: #333;
+      --code-fg: #ccc;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 20px;
+      background-color: var(--bg);
+      color: var(--fg);
+      font-family: Arial, sans-serif;
+    }
+    h1, h2 {
+      margin-top: 0;
+      color: var(--fg);
+    }
+    #drop-area {
+      width: 100%;
+      padding: 40px;
+      border: 2px dashed var(--border);
+      background: var(--panel-bg);
+      color: var(--fg);
+      text-align: center;
+      border-radius: 6px;
+      transition: background 0.2s;
+    }
+    #drop-area.highlight {
+      background-color: var(--highlight);
+    }
+    #file-info, #png-meta {
+      margin-top: 20px;
+      padding: 10px;
+      background: var(--panel-bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--code-fg);
+      font-family: monospace;
+      max-height: 200px;
+      overflow: auto;
+    }
+    #message {
+      margin: 20px 0;
+      padding: 10px;
+      background: var(--panel-bg);
+      border-left: 4px solid var(--accent);
+      border-radius: 3px;
+      color: var(--accent);
+    }
+    #alpha-list {
+      list-style: none;
+      padding: 0;
+    }
+    #alpha-list li {
+      background: var(--panel-bg);
+      margin: 4px 0;
+      padding: 6px;
+      border-radius: 3px;
+      border: 1px solid var(--border);
+    }
+    #zoom-controls {
+      margin-top: 10px;
+      display: none;
+      align-items: center;
+    }
+    #zoom-controls input[type=range] {
+      margin: 0 10px;
+    }
+    #canvas-container {
+      margin-top: 20px;
+      background: #000;
+      border: 1px solid var(--border);
+      display: inline-block;
+      position: relative;
+      overflow: visible; /* スクロールバーを無効化 */
+      border-radius: 4px;
+      overscroll-behavior: contain;
+      touch-action: none;
+    }
+    #image-canvas {
+      image-rendering: pixelated;
+      image-rendering: -moz-crisp-edges;
+      image-rendering: crisp-edges;
+      -ms-interpolation-mode: nearest-neighbor;
+      display: block;
+      transform-origin: top left;
+    }
+  </style>
+  <!-- EXIF.js for metadata extraction -->
+  <script src="https://cdn.jsdelivr.net/npm/exif-js"></script>
+  <!-- Panzoom library -->
+  <script src="https://cdn.jsdelivr.net/npm/panzoom@9.4.3/dist/panzoom.min.js"></script>
+</head>
+<body>
+  <h1>αチャンネルメタデータチェッカー</h1>
+  <div id="drop-area">ここに画像ファイルをドラッグ＆ドロップしてください</div>
+  <div id="file-info"></div>
+  <div id="png-meta"></div>
+  <div id="message"></div>
+  <h2>α値一覧（頻度順）</h2>
+  <ul id="alpha-list"></ul>
+  <div id="zoom-controls">
+    <label for="zoom-slider">拡大率:</label>
+    <input type="range" id="zoom-slider" min="1" max="30" value="1">
+    <span id="zoom-value">1x</span>
+  </div>
+  <div id="canvas-container">
+    <canvas id="image-canvas"></canvas>
+  </div>
+
+  <script>
+    const dropArea = document.getElementById('drop-area');
+    const fileInfoDiv = document.getElementById('file-info');
+    const pngMetaDiv = document.getElementById('png-meta');
+    const messageDiv = document.getElementById('message');
+    const alphaList = document.getElementById('alpha-list');
+    const zoomControls = document.getElementById('zoom-controls');
+    const zoomSlider = document.getElementById('zoom-slider');
+    const zoomValue = document.getElementById('zoom-value');
+    const canvas = document.getElementById('image-canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.imageSmoothingEnabled = false;
+    let originalImageData = null;
+
+    ['dragenter','dragover','dragleave','drop'].forEach(evt => {
+      dropArea.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); }, false);
+      document.body.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); }, false);
+    });
+    ['dragenter','dragover'].forEach(evt => dropArea.addEventListener(evt, () => dropArea.classList.add('highlight'), false));
+    ['dragleave','drop'].forEach(evt => dropArea.addEventListener(evt, () => dropArea.classList.remove('highlight'), false));
+    dropArea.addEventListener('drop', handleDrop, false);
+
+    function handleDrop(e) {
+      const file = e.dataTransfer.files[0];
+      clearAll();
+      if (!file) return;
+      displayFileInfo(file);
+      const reader = new FileReader();
+      reader.onload = () => {
+        const buffer = reader.result;
+        if (file.type === 'image/png') parsePNGMetadata(buffer);
+        const urlReader = new FileReader();
+        urlReader.onload = evt => loadImage(evt.target.result);
+        urlReader.readAsDataURL(file);
+      };
+      reader.readAsArrayBuffer(file);
+    }
+
+    function clearAll() {
+      fileInfoDiv.textContent = '';
+      pngMetaDiv.textContent = '';
+      messageDiv.textContent = '';
+      alphaList.innerHTML = '';
+      zoomControls.style.display = 'none';
+      canvas.style.transform = 'scale(1)';
+      zoomSlider.value = 1;
+      zoomValue.textContent = '1x';
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+
+    function displayFileInfo(file) {
+      const ul = document.createElement('ul');
+      [['名前', file.name], ['種類', file.type], ['サイズ', file.size + ' bytes'], ['最終更新', file.lastModifiedDate]].forEach(([k,v]) => {
+        const li = document.createElement('li'); li.textContent = `${k}: ${v}`; ul.appendChild(li);
+      });
+      fileInfoDiv.appendChild(ul);
+      if (file.type.startsWith('image/')) {
+        const img = new Image();
+        img.onload = function() {
+          EXIF.getData(img, function() {
+            const tags = EXIF.getAllTags(this);
+            const pre = document.createElement('pre');
+            pre.textContent = 'EXIF Metadata:\n' + JSON.stringify(tags, null, 2);
+            fileInfoDiv.appendChild(pre);
+          });
+        };
+        img.src = URL.createObjectURL(file);
+      }
+    }
+
+    function parsePNGMetadata(buffer) {
+      const dv = new DataView(buffer);
+      const text = [];
+      let offset = 8;
+      while (offset < dv.byteLength) {
+        const length = dv.getUint32(offset); offset += 4;
+        const type = String.fromCharCode(
+          dv.getUint8(offset), dv.getUint8(offset+1), dv.getUint8(offset+2), dv.getUint8(offset+3)
+        ); offset += 4;
+        const dataBytes = new Uint8Array(buffer, offset, length);
+        offset += length + 4;
+        if (['tEXt','zTXt','iTXt','tIME'].includes(type)) {
+          let val;
+          if (type === 'tEXt') val = new TextDecoder().decode(dataBytes);
+          else if (type === 'tIME') {
+            const base = offset - length - 4;
+            const year = dv.getUint16(base);
+            val = `${year}-${dv.getUint8(base+2)}-${dv.getUint8(base+3)} ` +
+                  `${dv.getUint8(base+4)}:${dv.getUint8(base+5)}:${dv.getUint8(base+6)}`;
+          } else val = '(compressed/text)';
+          text.push(`${type}: ${val}`);
+        }
+      }
+      if (text.length) {
+        const pre = document.createElement('pre');
+        pre.textContent = 'PNG Metadata:\n' + text.join('\n');
+        pngMetaDiv.appendChild(pre);
+      }
+    }
+
+    function loadImage(src) {
+      const img = new Image();
+      img.onload = () => {
+        canvas.width = img.width;
+        canvas.height = img.height;
+        ctx.drawImage(img, 0, 0);
+        originalImageData = ctx.getImageData(0, 0, img.width, img.height);
+        processImage();
+      };
+      img.src = src;
+    }
+
+    function processImage() {
+      if (!originalImageData) return;
+      const w = originalImageData.width, h = originalImageData.height;
+      const mask = ctx.createImageData(w, h);
+      const orig = originalImageData.data, m = mask.data;
+      const freq = {};
+      for (let i = 0; i < orig.length; i += 4) {
+        const a = orig[i+3]; freq[a] = (freq[a]||0) + 1;
+        const v = a === 255 ? 255 : 0;
+        m[i] = m[i+1] = m[i+2] = v; m[i+3] = 255;
+      }
+      Object.entries(freq).sort((a,b)=>b[1]-a[1]).forEach(([a,c]) => {
+        const li = document.createElement('li'); li.textContent = `α値: ${a} - 出現数: ${c}`; alphaList.appendChild(li);
+      });
+      const keys = Object.keys(freq).map(Number);
+      if (keys.length === 1 && keys[0] === 255) {
+        ctx.clearRect(0, 0, w, h);
+        messageDiv.textContent = 'この画像にはαチャンネルのメタデータは含まれていません。';
+        return;
+      }
+      let minX=w, minY=h, maxX=0, maxY=0;
+      for (let y=0; y<h; y++) for (let x=0; x<w; x++) {
+        if (orig[(y*w+x)*4+3] !== 255) {
+          minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+          minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+        }
+      }
+      const rw = maxX-minX+1, rh = maxY-minY+1;
+      const region = ctx.createImageData(rw, rh);
+      for (let yy=0; yy<rh; yy++) for (let xx=0; xx<rw; xx++) {
+        const s = ((minY+yy)*w + (minX+xx))*4, d = (yy*rw+xx)*4;
+        region.data.set(m.subarray(s, s+4), d);
+      }
+      canvas.width = rw; canvas.height = rh;
+      ctx.putImageData(region, 0, 0);
+      messageDiv.textContent = `メタデータ領域のサイズ: 幅 ${rw}px, 高さ ${rh}px`;
+      zoomControls.style.display = 'flex';
+    }
+
+    zoomSlider.addEventListener('input', () => {
+      const scale = zoomSlider.value;
+      canvas.style.transform = `scale(${scale})`;
+      zoomValue.textContent = `${scale}x`;
+    });
+
+    panzoom(document.getElementById('canvas-container'), {
+      smoothScroll: false,
+      bounds: true,
+      boundsPadding: 0.1,
+      beforeWheel: () => true
+    });
+  </script>
+</body>
+</html>
