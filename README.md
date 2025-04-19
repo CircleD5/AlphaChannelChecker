@@ -1,0 +1,2 @@
+# AlphaChannelChecker
+PNGイメージのαチャンネルにメタデータが含まれているかを確認する
